@@ -5,52 +5,73 @@ library(TTR)
 library(scales)
 library(httr)
 library(jsonlite)
+library(purrr)
+library(furrr)
+library(gridExtra)
+library(lubridate)
+
+# Подключаем библиотеку для работы с данными MOEX
+source("moex_data_lib.R")
 
 # UI часть
 ui <- fluidPage(
-  titlePanel("Interactive Trading Strategy - Channel Breakout"),
+  titlePanel("📊 Interactive Trading Strategy - Channel Breakout"),
   
   sidebarLayout(
     sidebarPanel(
       width = 3,
       # Режим работы
-      radioButtons("mode", "Data Mode:",
-                   choices = c("Simulated Data" = "sim", "Real MOEX Data" = "real"),
+      radioButtons("mode", "Режим работы:",
+                   choices = c("Симуляция данных" = "sim", "Реальные данные MOEX" = "real"),
                    selected = "sim"),
       
       # Параметры для симуляции
       conditionalPanel(
         condition = "input.mode == 'sim'",
-        sliderInput("seed", "Simulation Seed:", 
+        sliderInput("seed", "Seed для симуляции:", 
                    min = 1, max = 1000, value = 123, step = 1),
-        sliderInput("n_days", "Simulation Days:", 
-                   min = 50, max = 500, value = 200, step = 50)
+        sliderInput("n_days", "Дней для симуляции:", 
+                   min = 50, max = 500, value = 200, step = 50),
+        dateRangeInput("sim_date_range", "Период тестирования:",
+                      start = Sys.Date() - 365,
+                      end = Sys.Date())
       ),
       
       # Параметры для реальных данных
       conditionalPanel(
         condition = "input.mode == 'real'",
-        selectInput("ticker", "MOEX Ticker:", 
-                   choices = c("SBER", "GAZP", "LKOH", "ROSN", "VTBR", "YNDX", "MGNT"),
+        selectInput("ticker", "Тикер MOEX:", 
+                   choices = c('X5','INGO','AKRN','CHMF','EUTR','FESH','GOLD','HEAD','LEAS','LNZL','RASP','MTSS','MVID','POSI','RKKE','SBER','SIBN','SMLT','T','TASB','TATN','TATNP','UTAR','TGKA','UPRO','VKCO','TRMK','BSPB','MTLR','ENPG','LKOH','GECO','PHOR','PLZL','SNGSP','YDEX','IRAO','SNGS','GAZP','AFLT','DIAS','VTBR','SBMX','SBGD','SBRB','RENI','ROSN','PIKK','WUSH','AFKS')
                    selected = "SBER"),
-        dateRangeInput("date_range", "Data Period:",
-                      start = Sys.Date() - 365,
+        actionButton("update_data", "🔄 Обновить данные"),
+        checkboxInput("force_update", "Принудительное обновление", value = FALSE),
+        dateRangeInput("real_date_range", "Период тестирования:",
+                      start = as.Date("2020-01-01"),
                       end = Sys.Date())
       ),
       
       # Параметры стратегии
-      sliderInput("length", "Channel Length:", 
-                 min = 10, max = 100, value = 20, step = 5),
-      sliderInput("sma_period", "SMA Period:", 
-                 min = 5, max = 50, value = 20, step = 5),
-      sliderInput("risk_percent", "Risk per Trade (%):", 
-                 min = 1, max = 50, value = 20, step = 1),
-      sliderInput("channel_growth", "Channel Growth for Entry (%):", 
-                 min = 1, max = 10, value = 3, step = 0.5),
-      sliderInput("entry_offset", "Order Offset (% from channel):", 
-                 min = 1, max = 10, value = 5, step = 0.5),
+      sliderInput("length", "Длина канала:", 
+                 min = 5, max = 100, value = 20, step = 5),
+      sliderInput("sma_period", "Длина SMA:", 
+                 min = 5, max = 100, value = 20, step = 5),
+      sliderInput("risk_percent", "Риск на сделку (%):", 
+                 min = 1, max = 100, value = 20, step = 1),
+      sliderInput("channel_growth", "Рост канала для входа (%):", 
+                 min = 1, max = 30, value = 3, step = 0.5),
+      sliderInput("entry_offset", "Отступ для ордера (% от канала):", 
+                 min = 1, max = 50, value = 5, step = 0.5),
       
-      actionButton("run", "Run Backtest", class = "btn-primary")
+      # Новая опция: Take Profit
+      sliderInput("take_profit", "Take Profit (% от входа):", 
+                 min = 0, max = 100, value = 0, step = 1),
+      helpText("0% = отключено. При достижении Take Profit закрывается 90% позиции"),
+      
+      # Опция: включение/выключение отмены ордеров
+      checkboxInput("enable_cancel", "Включить отмену ордеров", value = TRUE),
+      helpText("При отключении: ордера не отменяются, даже если условие входа перестает выполняться"),
+      
+      actionButton("run", "🔄 Запустить тестирование", class = "btn-primary")
     ),
     
     mainPanel(
@@ -58,10 +79,10 @@ ui <- fluidPage(
       plotOutput("strategy_plot", height = "400px"),
       plotOutput("equity_plot", height = "200px"),
       br(),
-      h4("Backtest Results:"),
+      h4("📈 Результаты тестирования:"),
       tableOutput("results_table"),
       br(),
-      h4("Trade Details:"),
+      h4("💼 Детали сделок:"),
       div(style = 'overflow-x: scroll; height: 300px;',
           tableOutput("trades_table"))
     )
@@ -70,62 +91,72 @@ ui <- fluidPage(
 
 # Server часть
 server <- function(input, output, session) {
+  # Reactive value для хранения данных
+  moex_data <- reactiveVal()
+  strategy_data_value <- reactiveVal(NULL)
   
-  # Функция для получения реальных данных с MOEX
-  getMOEX <- function(ticker, start_date, end_date) {
-    tryCatch({
-      url <- paste0('https://iss.moex.com/iss/engines/stock/markets/shares/securities/', 
-                   ticker, '/candles.json?from=', start_date, 
-                   '&till=', end_date, '&interval=24')
-      response <- GET(url)
-      ticker_data <- fromJSON(content(response, "text"))
+  # Автоматический пересчет при изменении параметров
+  observe({
+    # Список всех параметров, которые должны запускать пересчет
+    input$length
+    input$sma_period
+    input$risk_percent
+    input$channel_growth
+    input$entry_offset
+    input$enable_cancel
+    input$take_profit
+    input$mode
+    input$seed
+    input$n_days
+    input$sim_date_range
+    input$real_date_range
+    input$ticker
+    
+    # Запускаем пересчет с небольшой задержкой для избежания множественных вычислений
+    invalidateLater(500)
+    isolate({
+      if (!is.null(moex_data()) || input$mode == "sim") {
+        calculate_strategy()
+      }
+    })
+  })
+  
+  # Обработчик кнопки обновления данных
+  observeEvent(input$update_data, {
+    if (input$mode == "real") {
+      showNotification("Загрузка данных MOEX...", type = "message")
       
-      if (!is.null(ticker_data$candles$data)) {
-        test <- as.data.frame(ticker_data$candles$data)
-        colnames(test) <- ticker_data[["candles"]][["columns"]]
+      tryCatch({
+        data <- loadMOEXData(input$ticker, input$force_update)
+        moex_data(data)
         
-        # Преобразование данных
-        numeric_cols <- c("open", "high", "low", "close", "volume")
-        for(col in numeric_cols) {
-          if(col %in% colnames(test)) {
-            test[[col]] <- as.numeric(as.character(test[[col]]))
-          }
+        # Обновляем доступные даты для выбора периода
+        if (!is.null(data) && nrow(data) > 0) {
+          min_date <- min(data$end)
+          max_date <- max(data$end)
+          
+          updateDateRangeInput(session, "real_date_range",
+                              start = max(min_date, as.Date("2020-01-01")),
+                              end = max_date,
+                              min = min_date,
+                              max = max_date)
         }
         
-        test$end <- as.Date(test$end)
-        test <- test[order(test$end), ]
-        
-        return(test)
-      } else {
-        stop("Failed to get data")
-      }
-    }, error = function(e) {
-      # Возвращаем симуляционные данные в случае ошибки
-      warning("MOEX data error: ", e$message)
-      return(simulate_data(input$seed, 100))
-    })
-  }
+        showNotification("Данные успешно загружены!", type = "message")
+        calculate_strategy()
+      }, error = function(e) {
+        showNotification(paste("Ошибка загрузки данных:", e$message), type = "error")
+      })
+    }
+  })
   
-  # Функция для симуляции данных
-  simulate_data <- function(seed, n_days) {
-    set.seed(seed)
-    dates <- seq.Date(Sys.Date() - n_days, Sys.Date(), by = "day")
-    prices <- cumprod(c(100, 1 + rnorm(n_days, 0.001, 0.02)))
-    
-    data <- data.frame(
-      end = dates,
-      open = prices * 0.99,
-      high = prices * 1.02,
-      low = prices * 0.98,
-      close = prices,
-      volume = sample(10000:50000, n_days + 1, replace = TRUE)
-    )
-    
-    return(data)
-  }
+  # Обработчик кнопки запуска тестирования
+  observeEvent(input$run, {
+    calculate_strategy()
+  })
   
-  # Reactive function for data and calculations
-  strategy_data <- eventReactive(input$run, {
+  # Функция для расчета стратегии
+  calculate_strategy <- function() {
     # Parameters
     initial_capital <- 100000
     length_val <- input$length
@@ -133,20 +164,36 @@ server <- function(input, output, session) {
     risk_percent_val <- input$risk_percent / 100
     channel_growth_val <- input$channel_growth / 100
     entry_offset_val <- input$entry_offset / 100
+    enable_cancel <- input$enable_cancel
+    take_profit_pct <- input$take_profit / 100  # Новая опция Take Profit
     
     # Get data based on mode
     if (input$mode == "sim") {
       data <- simulate_data(input$seed, input$n_days)
-      data_source <- "Simulation"
+      # Фильтруем симуляционные данные по выбранному периоду
+      data <- filterDataByDateRange(data, input$sim_date_range[1], input$sim_date_range[2])
+      data_source <- "Симуляция"
     } else {
-      data <- getMOEX(input$ticker, input$date_range[1], input$date_range[2])
-      data_source <- paste("MOEX", input$ticker)
+      # Используем заранее загруженные данные
+      data <- moex_data()
+      if (is.null(data)) {
+        return(NULL)
+      } else {
+        # Фильтруем по выбранному периоду
+        data <- filterDataByDateRange(data, input$real_date_range[1], input$real_date_range[2])
+        data_source <- paste("MOEX", input$ticker)
+      }
+    }
+    
+    # Проверяем, что данные есть после фильтрации
+    if (is.null(data) || nrow(data) == 0) {
+      return(NULL)
     }
     
     # Calculate indicators
-    data$ema1 <- TTR::EMA(data$close, sma_period_val)
     data$upperW <- TTR::runMax(data$close, length_val * 2)
-    data$lowerW <- TTR::runMin(data$close, length_val * 2)
+    data$lowerW <- TTR::runMin(data$close, length_val / 2)
+    data$sma_exit <- TTR::SMA(data$close, sma_period_val)
     data <- data[complete.cases(data), ]
     
     # Initialize variables
@@ -159,6 +206,7 @@ server <- function(input, output, session) {
     trades <- data.frame()
     equity <- rep(initial_capital, nrow(data))
     signals <- rep("No signal", nrow(data))
+    take_profit_triggered <- FALSE  # Флаг срабатывания Take Profit
     
     # Main trading loop
     for(i in 2:nrow(data)) {
@@ -174,38 +222,82 @@ server <- function(input, output, session) {
       }
       
       order_price <- current$upperW * (1 + entry_offset_val)
-      exitBuy <- current$close < current$ema1
+      exitBuy <- current$close < current$sma_exit || current$close <= current$lowerW
       
       # Process pending order
-      if(pending_order && current$high >= pending_price) {
-        risk_amount <- capital * risk_percent_val
-        position_size <- risk_amount / pending_price
+      if(pending_order) {
+        # Проверяем сработал ли ордер
+        if (current$high >= pending_price) {
+          risk_amount <- capital * risk_percent_val
+          position_size <- risk_amount / pending_price
+          
+          position <- floor(position_size)
+          entry_price <- pending_price
+          entry_date <- current$end
+          capital <- capital - (position * entry_price)
+          
+          trades <- rbind(trades, data.frame(
+            EntryDate = entry_date,
+            ExitDate = NA,
+            EntryPrice = entry_price,
+            ExitPrice = NA,
+            Shares = position,
+            Type = "BUY",
+            Reason = "Order Executed",
+            stringsAsFactors = FALSE
+          ))
+          
+          signals[i] <- "Order Executed"
+          pending_order <- FALSE
+          pending_price <- 0
+          take_profit_triggered <- FALSE  # Сброс флага при новом входе
+        }
         
-        position <- floor(position_size)
-        entry_price <- pending_price
-        entry_date <- current$end
-        capital <- capital - (position * entry_price)
-        
-        trades <- rbind(trades, data.frame(
-          EntryDate = entry_date,
-          ExitDate = NA,
-          EntryPrice = entry_price,
-          ExitPrice = NA,
-          Shares = position,
-          Type = "BUY",
-          Reason = "Order Executed",
-          stringsAsFactors = FALSE
-        ))
-        
-        signals[i] <- "Order Executed"
-        pending_order <- FALSE
+        # ЛОГИКА ОТМЕНЫ ОРДЕРОВ - зависит от настройки
+        if (enable_cancel && !buySignal) {
+          pending_order <- FALSE
+          pending_price <- 0
+          signals[i] <- "Order Canceled"
+        }
       }
       
       # Process open position
       if(position > 0) {
-        equity[i] <- capital + (position * current$close)
+        current_portfolio_value <- capital + (position * current$close)
+        equity[i] <- current_portfolio_value
         
-        if(exitBuy) {
+        # Проверка Take Profit (только если не сработал ранее и TP > 0)
+        if (take_profit_pct > 0 && !take_profit_triggered) {
+          take_profit_price <- entry_price * (1 + take_profit_pct)
+          
+          if (current$high >= take_profit_price) {
+            # Закрываем 90% позиции по Take Profit
+            shares_to_close <- floor(position * 0.9)
+            profit <- shares_to_close * (take_profit_price - entry_price)
+            
+            # Обновляем капитал и позицию
+            capital <- capital + (shares_to_close * take_profit_price)
+            position <- position - shares_to_close
+            
+            # Записываем частичное закрытие
+            trades <- rbind(trades, data.frame(
+              EntryDate = entry_date,
+              ExitDate = current$end,
+              EntryPrice = entry_price,
+              ExitPrice = take_profit_price,
+              Shares = shares_to_close,
+              Type = "SELL",
+              Reason = "Take Profit (90%)",
+              stringsAsFactors = FALSE
+            ))
+            
+            take_profit_triggered <- TRUE
+            signals[i] <- "Take Profit"
+          }
+        }
+        
+        # Выход по SMA (для оставшейся позиции)
+        if(exitBuy && position > 0) {
           capital <- capital + (position * current$close)
           profit <- position * (current$close - entry_price)
           
@@ -216,20 +308,36 @@ server <- function(input, output, session) {
             ExitPrice = current$close,
             Shares = position,
             Type = "SELL",
-            Reason = "Exit Signal",
+            Reason = ifelse(take_profit_triggered, "Exit Signal (SMA) - Remainder", "Exit Signal (SMA)"),
             stringsAsFactors = FALSE
           ))
           
           position <- 0
+          entry_price <- 0
+          entry_date <- NULL
+          take_profit_triggered <- FALSE
           signals[i] <- "Exit"
         }
       } else if(buySignal && !pending_order) {
         pending_order <- TRUE
         pending_price <- order_price
         signals[i] <- "Order Placed"
+        
+        trades <- rbind(trades, data.frame(
+          EntryDate = current$end,
+          ExitDate = NA,
+          EntryPrice = order_price,
+          ExitPrice = NA,
+          Shares = NA,
+          Type = "PENDING",
+          Reason = "Pending Order",
+          stringsAsFactors = FALSE
+        ))
       }
       
-      if(!pending_order && position == 0) {
+      if(pending_order && position == 0) {
+        equity[i] <- capital
+      } else if(!pending_order && position == 0) {
         equity[i] <- capital
       }
     }
@@ -259,69 +367,152 @@ server <- function(input, output, session) {
       trades$ReturnPct <- ifelse(trades$Type == "SELL",
                                 round((trades$ExitPrice - trades$EntryPrice) / trades$EntryPrice * 100, 2),
                                 NA)
+      
+      trades$EntryDate <- as.character(as.Date(trades$EntryDate))
+      trades$ExitDate <- as.character(as.Date(trades$ExitDate))
     }
     
-    # Return results
-    list(
+    # Сохраняем результаты
+    result <- list(
       data = data,
       trades = trades,
       equity = equity,
       signals = signals,
       final_capital = tail(equity, 1),
-      data_source = data_source
+      data_source = data_source,
+      enable_cancel = enable_cancel,
+      take_profit = input$take_profit
     )
-  })
+    
+    strategy_data_value(result)
+  }
+  
+  # Функция для фильтрации данных по выбранному периоду
+  filterDataByDateRange <- function(data, start_date, end_date) {
+    if (!is.null(data) && nrow(data) > 0) {
+      filtered_data <- data %>%
+        filter(end >= as.Date(start_date) & end <= as.Date(end_date))
+      return(filtered_data)
+    }
+    return(data)
+  }
   
   # Strategy plot
   output$strategy_plot <- renderPlot({
-    result <- strategy_data()
-    data <- result$data
+    result <- strategy_data_value()
+    if (is.null(result)) return(NULL)
     
+    data <- result$data
     plot_data <- data
     plot_data$signal <- result$signals[1:nrow(data)]
+    
+    # Фильтруем сигналы в зависимости от настройки
+    if (!result$enable_cancel) {
+      plot_data$signal[plot_data$signal == "Order Canceled"] <- "No signal"
+    }
     
     ggplot(plot_data, aes(x = end)) +
       geom_line(aes(y = close, color = "Price"), size = 1) +
       geom_line(aes(y = upperW, color = "Upper Channel"), size = 0.8, alpha = 0.7) +
-      geom_line(aes(y = ema1, color = "SMA"), size = 0.8, linetype = "dashed") +
+      geom_line(aes(y = lowerW, color = "Upper Channel"), size = 0.8, alpha = 0.7) +
+      geom_line(aes(y = sma_exit, color = "SMA (Exit)"), size = 0.8, linetype = "dashed") +
       geom_point(data = subset(plot_data, signal != "No signal"), 
                  aes(y = close, color = signal), size = 3) +
       scale_color_manual(values = c(
         "Price" = "black", 
         "Upper Channel" = "red", 
-        "SMA" = "blue",
+        "SMA (Exit)" = "blue",
         "Order Placed" = "orange",
         "Order Executed" = "green",
-        "Exit" = "purple"
+        "Exit" = "purple",
+        "Take Profit" = "darkgreen",
+        "Order Canceled" = "gray"
       )) +
-      labs(title = paste("Trading Strategy -", result$data_source),
-           subtitle = paste("Channel:", input$length, "days | SMA:", input$sma_period),
-           x = "Date", y = "Price") +
+      labs(title = paste("Торговая стратегия -", result$data_source),
+           subtitle = paste("Канал:", input$length, "дней | SMA (выход):", input$sma_period,
+                           "| Take Profit:", input$take_profit, "%",
+                           "| Отмена ордеров:", ifelse(result$enable_cancel, "ВКЛ", "ВЫКЛ")),
+           x = "Дата", y = "Цена") +
       theme_minimal() +
       theme(legend.position = "bottom")
   })
   
   # Equity plot
   output$equity_plot <- renderPlot({
-    result <- strategy_data()
-    data <- result$data
+    result <- strategy_data_value()
+    if (is.null(result)) return(NULL)
     
+    data <- result$data
     equity_df <- data.frame(
       Date = data$end,
-      Equity = result$equity[1:nrow(data)]
+      Equity = result$equity[1:nrow(data)],
+      Signal = result$signals[1:nrow(data)]
     )
     
-    ggplot(equity_df, aes(x = Date, y = Equity)) +
+    # Фильтруем сигналы в зависимости от настройки
+    if (!result$enable_cancel) {
+      equity_df$Signal[equity_df$Signal == "Order Canceled"] <- "No signal"
+    }
+    
+    signal_points <- equity_df %>%
+      filter(Signal != "No signal") %>%
+      mutate(
+        Color = case_when(
+          Signal == "Order Placed" ~ "orange",
+          Signal == "Order Executed" ~ "green",
+          Signal == "Exit" ~ "purple",
+          Signal == "Take Profit" ~ "darkgreen",
+          Signal == "Order Canceled" ~ "gray",
+          TRUE ~ "black"
+        ),
+        Shape = case_when(
+          Signal == "Order Placed" ~ 17,
+          Signal == "Order Executed" ~ 16,
+          Signal == "Exit" ~ 15,
+          Signal == "Take Profit" ~ 18,
+          Signal == "Order Canceled" ~ 4,
+          TRUE ~ 1
+        )
+      )
+    
+    p <- ggplot(equity_df, aes(x = Date, y = Equity)) +
       geom_line(color = "blue", size = 1) +
-      labs(title = "Equity Curve", x = "Date", y = "Capital") +
+      geom_hline(yintercept = 100000, linetype = "dashed", color = "red", alpha = 0.7) +
+      geom_point(data = signal_points, 
+                 aes(color = Signal, shape = Signal), size = 3, alpha = 0.8) +
+      scale_color_manual(values = c(
+        "Order Placed" = "orange",
+        "Order Executed" = "green",
+        "Exit" = "purple",
+        "Take Profit" = "darkgreen",
+        "Order Canceled" = "gray"
+      )) +
+      scale_shape_manual(values = c(
+        "Order Placed" = 17,
+        "Order Executed" = 16,
+        "Exit" = 15,
+        "Take Profit" = 18,
+        "Order Canceled" = 4
+      )) +
+      labs(title = "Динамика капитала", 
+           subtitle = paste("Красная линия - начальный капитал (100,000 руб.) |",
+                           "Take Profit:", input$take_profit, "% |",
+                           "Отмена ордеров:", ifelse(result$enable_cancel, "ВКЛ", "ВЫКЛ")),
+           x = "Дата", y = "Капитал") +
       theme_minimal() +
-      scale_y_continuous(labels = scales::comma)
+      scale_y_continuous(labels = scales::comma) +
+      theme(legend.position = "bottom")
+    
+    p
   })
   
   # Results table
   output$results_table <- renderTable({
-    result <- strategy_data()
+    result <- strategy_data_value()
+    if (is.null(result)) return(NULL)
+    
     trades <- result$trades
+    equity_series <- result$equity[1:nrow(result$data)]
     
     if(nrow(trades) > 0) {
       executed_trades <- trades[trades$Type == "SELL", ]
@@ -334,18 +525,36 @@ server <- function(input, output, session) {
         max_loss <- min(executed_trades$Profit, na.rm = TRUE)
         win_rate <- profitable_trades / total_trades
         
+        max_equity <- max(equity_series, na.rm = TRUE)
+        min_equity <- min(equity_series, na.rm = TRUE)
+        max_drawdown <- round((max_equity - min(equity_series)) / max_equity * 100, 1)
+        
+        # Анализ сделок с Take Profit
+        tp_trades <- executed_trades[grepl("Take Profit", executed_trades$Reason), ]
+        tp_count <- nrow(tp_trades)
+        tp_profit <- ifelse(tp_count > 0, sum(tp_trades$Profit, na.rm = TRUE), 0)
+        
         data.frame(
-          Metric = c("Data Source", "Total Trades", "Profitable Trades", 
-                    "Win Rate", "Total Profit", 
-                    "Max Profit", "Max Loss", "Final Capital"),
-          Value = c(result$data_source,
-                    total_trades, 
-                    profitable_trades,
-                    paste0(round(win_rate * 100, 1), "%"), 
-                    round(total_profit, 2),
-                    round(max_profit, 2),
-                    round(max_loss, 2),
-                    round(result$final_capital, 2))
+          Метрика = c("Режим", "Всего сделок", "Прибыльных сделок", 
+                     "Процент прибыльных", "Общая прибыль", 
+                     "Макс. прибыль", "Макс. убыток", "Конечный капитал",
+                     "Макс. капитал", "Мин. капитал", "Макс. просадка",
+                     "Отмена ордеров", "Take Profit", "Сделки с TP", "Прибыль от TP"),
+          Значение = c(result$data_source,
+                      total_trades, 
+                      profitable_trades,
+                      paste0(round(win_rate * 100, 1), "%"), 
+                      round(total_profit, 2),
+                      round(max_profit, 2),
+                      round(max_loss, 2),
+                      round(result$final_capital, 2),
+                      round(max_equity, 2),
+                      round(min_equity, 2),
+                      paste0(max_drawdown, "%"),
+                      ifelse(result$enable_cancel, "ВКЛ", "ВЫКЛ"),
+                      paste0(input$take_profit, "%"),
+                      tp_count,
+                      round(tp_profit, 2))
         )
       }
     }
@@ -353,11 +562,15 @@ server <- function(input, output, session) {
   
   # Trades table
   output$trades_table <- renderTable({
-    result <- strategy_data()
+    result <- strategy_data_value()
+    if (is.null(result)) return(NULL)
+    
     trades <- result$trades
     
     if(nrow(trades) > 0) {
-      trades %>%
+      # Фильтруем только исполненные сделки (BUY/SELL)
+      executed_trades <- trades %>%
+        filter(Type %in% c("BUY", "SELL")) %>%
         select(EntryDate, ExitDate, Type, EntryPrice, ExitPrice, Shares, Profit, ReturnPct, Reason) %>%
         mutate(
           Profit = ifelse(is.na(Profit), "-", round(Profit, 2)),
@@ -366,6 +579,8 @@ server <- function(input, output, session) {
           ExitDate = as.character(ExitDate)
         ) %>%
         arrange(desc(EntryDate))
+      
+      executed_trades
     }
   })
 }
