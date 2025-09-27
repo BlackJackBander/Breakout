@@ -13,6 +13,116 @@ library(lubridate)
 # Подключаем библиотеку для работы с данными MOEX
 source("moex_data_lib.R")
 
+# ===== ОПТИМАЛЬНЫЕ ПАРАМЕТРЫ =====
+# Create a data matrix for new strategy parameters
+first <- matrix(c(
+  # Ticker, Length, SMA, Risk, Growth, Offset
+  10, 40, 5, 2, 3,    # RENI
+  15, 10, 5, 3, 1,    # ROSN
+  10, 20, 5, 2, 1,    # SBER
+  5, 10, 5, 1, 1,     # SBGD
+  10, 10, 5, 2, 1,    # SBMX
+  20, 30, 5, 1, 1,    # SBRB
+  10, 30, 5, 3, 1,    # SIBN
+  10, 20, 5, 4, 1,    # SMLT
+  10, 10, 5, 3, 1,    # SNGS
+  5, 10, 5, 1, 1,     # SNGSP
+  10, 20, 3, 3, 1,    # T
+  5, 20, 5, 1, 1,     # TASB
+  10, 10, 5, 4, 1,    # TATN
+  10, 20, 5, 5, 1,    # TATNP
+  5, 70, 5, 5, 1,     # TGKA
+  10, 100, 5, 1, 1,   # TRMK
+  5, 90, 5, 1, 1,     # UPRO
+  5, 80, 5, 2, 5,     # UTAR
+  35, 30, 5, 1, 1,    # VKCO
+  15, 30, 5, 1, 3     # VTBR
+), ncol = 5, byrow = TRUE)
+
+rownames(first) <- c("RENI", "ROSN", "SBER", "SBGD", "SBMX", "SBRB", "SIBN", 
+                     "SMLT", "SNGS", "SNGSP", "T", "TASB", "TATN", "TATNP", 
+                     "TGKA", "TRMK", "UPRO", "UTAR", "VKCO", "VTBR")
+colnames(first) <- c("Length", "SMA", "Risk", "Growth", "Offset")
+
+# Create a data matrix for strategy parameters
+two <- matrix(c(
+  # Ticker, Length, SMA, Risk, Growth, Offset
+  10, 10, 5, 3, 2,    # AFKS
+  10, 20, 5, 2, 1,    # AFLT
+  10, 20, 5, 3, 1,    # BSPB
+  5, 100, 5, 1, 1,    # CHMF
+  10, 90, 5, 3, 1,    # DIAS
+  10, 70, 5, 1, 2,    # ENPG
+  15, 100, 5, 1, 1,   # EUTR
+  10, 60, 5, 2, 3,    # FESH
+  5, 70, 5, 2, 3,     # GAZP
+  5, 100, 5, 1, 1,    # GECO
+  15, 40, 4, 1, 2,    # HEAD
+  10, 10, 5, 2, 1,    # IRAO
+  5, 80, 5, 1, 2,     # LEAS
+  5, 40, 5, 5, 1,     # MTLR
+  10, 20, 5, 1, 1,    # MTSS
+  15, 50, 5, 1, 1,    # MVID
+  10, 10, 5, 1, 1,    # PIKK
+  10, 10, 5, 1, 1,    # PLZL
+  10, 20, 5, 2, 1,    # POSI
+  5, 10, 5, 4, 1      # RASP
+), ncol = 5, byrow = TRUE)
+
+rownames(two) <- c("AFKS", "AFLT", "BSPB", "CHMF", "DIAS", "ENPG", "EUTR", 
+                   "FESH", "GAZP", "GECO", "HEAD", "IRAO", "LEAS", "MTLR", 
+                   "MTSS", "MVID", "PIKK", "PLZL", "POSI", "RASP")
+colnames(two) <- c("Length", "SMA", "Risk", "Growth", "Offset")
+
+# Create a data matrix for new strategy parameters
+three <- matrix(c(
+  # Ticker, Length, SMA, Risk, Growth, Offset
+  10, 20, 5, 1, 4,    # WUSH
+  10, 20, 4, 3, 1     # YDEX
+), ncol = 5, byrow = TRUE)
+
+rownames(three) <- c("WUSH", "YDEX")
+colnames(three) <- c("Length", "SMA", "Risk", "Growth", "Offset")
+
+# Объединяем все параметры
+optimise_param <- rbind(first, two, three)
+
+# Функция для получения оптимальных параметров по тикеру
+get_optimal_params <- function(ticker) {
+  if (ticker %in% rownames(optimise_param)) {
+    return(as.list(optimise_param[ticker, ]))
+  } else {
+    # Возвращаем параметры по умолчанию, если тикер не найден
+    return(list(Length = 10, SMA = 20, Risk = 2, Growth = 1, Offset = 1))
+  }
+}
+
+# Функция для обработки и нормализации данных MOEX
+process_moex_data <- function(data) {
+  if (is.null(data) || nrow(data) == 0) {
+    return(NULL)
+  }
+  
+  # Преобразуем все числовые колонки к numeric
+  numeric_columns <- c('open', 'high', 'low', 'close', 'volume')
+  
+  for (col in numeric_columns) {
+    if (col %in% names(data)) {
+      data[[col]] <- as.numeric(as.character(data[[col]]))
+    }
+  }
+  
+  # Убеждаемся, что дата в правильном формате
+  if ('end' %in% names(data)) {
+    data$end <- as.Date(data$end)
+  }
+  
+  # Удаляем строки с NA в ключевых колонках
+  data <- data[complete.cases(data[, c('end', 'close')]), ]
+  
+  return(data)
+}
+
 # UI часть
 ui <- fluidPage(
   titlePanel("📊 Interactive Trading Strategy - Channel Breakout"),
@@ -23,7 +133,7 @@ ui <- fluidPage(
       # Режим работы
       radioButtons("mode", "Режим работы:",
                    choices = c("Симуляция данных" = "sim", "Реальные данные MOEX" = "real"),
-                   selected = "sim"),
+                   selected = "real"),
       
       # Параметры для симуляции
       conditionalPanel(
@@ -41,13 +151,15 @@ ui <- fluidPage(
       conditionalPanel(
         condition = "input.mode == 'real'",
         selectInput("ticker", "Тикер MOEX:", 
-                   choices = c('X5','INGO','AKRN','CHMF','EUTR','FESH','GOLD','HEAD','LEAS','LNZL','RASP','MTSS','MVID','POSI','RKKE','SBER','SIBN','SMLT','T','TASB','TATN','TATNP','UTAR','TGKA','UPRO','VKCO','TRMK','BSPB','MTLR','ENPG','LKOH','GECO','PHOR','PLZL','SNGSP','YDEX','IRAO','SNGS','GAZP','AFLT','DIAS','VTBR','SBMX','SBGD','SBRB','RENI','ROSN','PIKK','WUSH','AFKS')
+                   choices = c('X5','INGO','AKRN','CHMF','EUTR','FESH','GOLD','HEAD','LEAS','LNZL','RASP','MTSS','MVID','POSI','RKKE','SBER','SIBN','SMLT','T','TASB','TATN','TATNP','UTAR','TGKA','UPRO','VKCO','TRMK','BSPB','MTLR','ENPG','LKOH','GECO','PHOR','PLZL','SNGSP','YDEX','IRAO','SNGS','GAZP','AFLT','DIAS','VTBR','SBMX','SBGD','SBRB','RENI','ROSN','PIKK','WUSH','AFKS'),
                    selected = "SBER"),
         actionButton("update_data", "🔄 Обновить данные"),
         checkboxInput("force_update", "Принудительное обновление", value = FALSE),
         dateRangeInput("real_date_range", "Период тестирования:",
                       start = as.Date("2020-01-01"),
                       end = Sys.Date())
+        
+        
       ),
       
       # Параметры стратегии
@@ -61,6 +173,8 @@ ui <- fluidPage(
                  min = 1, max = 30, value = 3, step = 0.5),
       sliderInput("entry_offset", "Отступ для ордера (% от канала):", 
                  min = 1, max = 50, value = 5, step = 0.5),
+      actionButton("auto_params", "🔄 Автозагрузка параметров", class = "btn-success"),
+      actionButton("reset_params", "Сброс параметров", class = "btn-warning btn-sm"),
       
       # Новая опция: Take Profit
       sliderInput("take_profit", "Take Profit (% от входа):", 
@@ -95,6 +209,91 @@ server <- function(input, output, session) {
   moex_data <- reactiveVal()
   strategy_data_value <- reactiveVal(NULL)
   
+  # Автозагрузка оптимальных параметров при смене тикера
+  observeEvent(input$ticker, {
+    if (input$mode == "real") {
+      params <- get_optimal_params(input$ticker)
+      
+      updateSliderInput(session, "length", value = params$Length)
+      updateSliderInput(session, "sma_period", value = params$SMA)
+      updateSliderInput(session, "risk_percent", value = params$Risk)
+      updateSliderInput(session, "channel_growth", value = params$Growth)
+      updateSliderInput(session, "entry_offset", value = params$Offset)
+      
+      showNotification(
+        paste("Оптимальные параметры для", input$ticker, "загружены автоматически!"),
+        type = "message", duration = 3
+      )
+    }
+  })
+  
+  # Ручная автозагрузка параметров по кнопке
+  observeEvent(input$auto_params, {
+    if (input$mode == "real") {
+      params <- get_optimal_params(input$ticker)
+      
+      updateSliderInput(session, "length", value = params$Length)
+      updateSliderInput(session, "sma_period", value = params$SMA)
+      updateSliderInput(session, "risk_percent", value = params$Risk)
+      updateSliderInput(session, "channel_growth", value = params$Growth)
+      updateSliderInput(session, "entry_offset", value = params$Offset)
+      
+      showNotification(
+        paste("Оптимальные параметры для", input$ticker, "загружены!"),
+        type = "message", duration = 3
+      )
+    }
+  })
+  
+  # Сброс параметров к значениям по умолчанию
+  observeEvent(input$reset_params, {
+    updateSliderInput(session, "length", value = 20)
+    updateSliderInput(session, "sma_period", value = 20)
+    updateSliderInput(session, "risk_percent", value = 20)
+    updateSliderInput(session, "channel_growth", value = 3)
+    updateSliderInput(session, "entry_offset", value = 5)
+    
+    showNotification("Параметры сброшены к значениям по умолчанию", type = "warning")
+  })
+  
+  # Обработчик кнопки обновления данных
+  observeEvent(input$update_data, {
+    if (input$mode == "real") {
+      showNotification("Загрузка данных MOEX...", type = "message")
+      
+      tryCatch({
+        # Загружаем данные
+        data <- loadMOEXData(input$ticker, input$force_update)
+        
+        # Обрабатываем и нормализуем данные
+        data <- process_moex_data(data)
+        
+        if (is.null(data) || nrow(data) == 0) {
+          stop("Не удалось загрузить данные или данные пустые")
+        }
+        
+        moex_data(data)
+        
+        # Обновляем доступные даты для выбора периода
+        if (!is.null(data) && nrow(data) > 0) {
+          min_date <- min(data$end)
+          max_date <- max(data$end)
+          
+          updateDateRangeInput(session, "real_date_range",
+                              start = max(min_date, as.Date("2020-01-01")),
+                              end = max_date,
+                              min = min_date,
+                              max = max_date)
+        }
+        
+        showNotification("Данные успешно загружены!", type = "message")
+        calculate_strategy()
+      }, error = function(e) {
+        showNotification(paste("Ошибка загрузки данных:", e$message), type = "error")
+      })
+    }
+  })
+  
   # Автоматический пересчет при изменении параметров
   observe({
     # Список всех параметров, которые должны запускать пересчет
@@ -121,35 +320,6 @@ server <- function(input, output, session) {
     })
   })
   
-  # Обработчик кнопки обновления данных
-  observeEvent(input$update_data, {
-    if (input$mode == "real") {
-      showNotification("Загрузка данных MOEX...", type = "message")
-      
-      tryCatch({
-        data <- loadMOEXData(input$ticker, input$force_update)
-        moex_data(data)
-        
-        # Обновляем доступные даты для выбора периода
-        if (!is.null(data) && nrow(data) > 0) {
-          min_date <- min(data$end)
-          max_date <- max(data$end)
-          
-          updateDateRangeInput(session, "real_date_range",
-                              start = max(min_date, as.Date("2020-01-01")),
-                              end = max_date,
-                              min = min_date,
-                              max = max_date)
-        }
-        
-        showNotification("Данные успешно загружены!", type = "message")
-        calculate_strategy()
-      }, error = function(e) {
-        showNotification(paste("Ошибка загрузки данных:", e$message), type = "error")
-      })
-    }
-  })
-  
   # Обработчик кнопки запуска тестирования
   observeEvent(input$run, {
     calculate_strategy()
@@ -165,7 +335,7 @@ server <- function(input, output, session) {
     channel_growth_val <- input$channel_growth / 100
     entry_offset_val <- input$entry_offset / 100
     enable_cancel <- input$enable_cancel
-    take_profit_pct <- input$take_profit / 100  # Новая опция Take Profit
+    take_profit_pct <- input$take_profit / 100
     
     # Get data based on mode
     if (input$mode == "sim") {
@@ -190,9 +360,14 @@ server <- function(input, output, session) {
       return(NULL)
     }
     
+    # Убеждаемся, что данные в правильном формате
+    data$close <- as.numeric(data$close)
+    data$high <- as.numeric(data$high)
+    data$low <- as.numeric(data$low)
+    
     # Calculate indicators
     data$upperW <- TTR::runMax(data$close, length_val * 2)
-    data$lowerW <- TTR::runMin(data$close, length_val / 2)
+    data$lowerW <- TTR::runMin(data$close, (length_val *2)/1.2)
     data$sma_exit <- TTR::SMA(data$close, sma_period_val)
     data <- data[complete.cases(data), ]
     
@@ -206,7 +381,7 @@ server <- function(input, output, session) {
     trades <- data.frame()
     equity <- rep(initial_capital, nrow(data))
     signals <- rep("No signal", nrow(data))
-    take_profit_triggered <- FALSE  # Флаг срабатывания Take Profit
+    take_profit_triggered <- FALSE
     
     # Main trading loop
     for(i in 2:nrow(data)) {
@@ -250,7 +425,7 @@ server <- function(input, output, session) {
           signals[i] <- "Order Executed"
           pending_order <- FALSE
           pending_price <- 0
-          take_profit_triggered <- FALSE  # Сброс флага при новом входе
+          take_profit_triggered <- FALSE
         }
         
         # ЛОГИКА ОТМЕНЫ ОРДЕРОВ - зависит от настройки
@@ -266,20 +441,17 @@ server <- function(input, output, session) {
         current_portfolio_value <- capital + (position * current$close)
         equity[i] <- current_portfolio_value
         
-        # Проверка Take Profit (только если не сработал ранее и TP > 0)
+        # Проверка Take Profit
         if (take_profit_pct > 0 && !take_profit_triggered) {
           take_profit_price <- entry_price * (1 + take_profit_pct)
           
           if (current$high >= take_profit_price) {
-            # Закрываем 90% позиции по Take Profit
             shares_to_close <- floor(position * 0.9)
             profit <- shares_to_close * (take_profit_price - entry_price)
             
-            # Обновляем капитал и позицию
             capital <- capital + (shares_to_close * take_profit_price)
             position <- position - shares_to_close
             
-            # Записываем частичное закрытие
             trades <- rbind(trades, data.frame(
               EntryDate = entry_date,
               ExitDate = current$end,
@@ -296,7 +468,7 @@ server <- function(input, output, session) {
           }
         }
         
-        # Выход по SMA (для оставшейся позиции)
+        # Выход по SMA
         if(exitBuy && position > 0) {
           capital <- capital + (position * current$close)
           profit <- position * (current$close - entry_price)
@@ -406,7 +578,6 @@ server <- function(input, output, session) {
     plot_data <- data
     plot_data$signal <- result$signals[1:nrow(data)]
     
-    # Фильтруем сигналы в зависимости от настройки
     if (!result$enable_cancel) {
       plot_data$signal[plot_data$signal == "Order Canceled"] <- "No signal"
     }
@@ -449,7 +620,6 @@ server <- function(input, output, session) {
       Signal = result$signals[1:nrow(data)]
     )
     
-    # Фильтруем сигналы в зависимости от настройки
     if (!result$enable_cancel) {
       equity_df$Signal[equity_df$Signal == "Order Canceled"] <- "No signal"
     }
@@ -529,7 +699,6 @@ server <- function(input, output, session) {
         min_equity <- min(equity_series, na.rm = TRUE)
         max_drawdown <- round((max_equity - min(equity_series)) / max_equity * 100, 1)
         
-        # Анализ сделок с Take Profit
         tp_trades <- executed_trades[grepl("Take Profit", executed_trades$Reason), ]
         tp_count <- nrow(tp_trades)
         tp_profit <- ifelse(tp_count > 0, sum(tp_trades$Profit, na.rm = TRUE), 0)
@@ -568,7 +737,6 @@ server <- function(input, output, session) {
     trades <- result$trades
     
     if(nrow(trades) > 0) {
-      # Фильтруем только исполненные сделки (BUY/SELL)
       executed_trades <- trades %>%
         filter(Type %in% c("BUY", "SELL")) %>%
         select(EntryDate, ExitDate, Type, EntryPrice, ExitPrice, Shares, Profit, ReturnPct, Reason) %>%
